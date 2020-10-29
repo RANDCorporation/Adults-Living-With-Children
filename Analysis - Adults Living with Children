@@ -1,0 +1,453 @@
+* COMMENTARY (The RAND Blog)
+* Title: Sitting It Out? Or Pushed Out? Women Are Leaving the Labor Force in Record Numbers
+
+* The commentary can be found at the following URL: https://www.rand.org/blog/2020/10/sitting-it-out-or-pushed-out-women-are-leaving-the.html
+
+* Commentary written by: Kathryn Anne Edwards
+
+* Stata code written by: Daniel Schwam
+
+* This Do file uses a pre-generated data dictionary from IPUMS to format the CPS extract.
+
+* NOTE(S): 
+* 1. You need to set the Stata working directory to the path where the data file 
+*    is located.
+* 2. You also need to ensure that the CPS data extract file name reflects the file 
+*    name of your query (see line 68 of "Format CPS extract.do").
+* 3. See the end of this Do file for a list of the variables in our IPUMS extract.
+
+* Set working directory
+cd []
+
+global cpsextract 00045
+
+* Format raw CPS data from IPUMS
+do "Format CPS extract.do"
+
+* Load analytic file
+use "cps_${cpsextract}.dta", clear
+
+* Create a unique household identifier from hrhhid and hrhhid2, which together 
+* uniquely identify households within basic monthly samples.
+* (https://cps.ipums.org/cps-action/variables/HRHHID#description_section)
+egen hhid = group(year month hrhhid hrhhid2)
+
+* Identify households with at least 1 child under 17
+gen child_under_17 = (age <= 17)
+bys hhid: egen child_in_hh = max(child_under_17)
+bys hhid: egen nchild_in_hh = total(child_under_17)
+
+* Create grouping for households with 3+ children
+replace nchild_in_hh = 3 if nchild_in_hh > 3
+
+* Age of oldest child in household
+bys hhid: egen oldestchild_in_hh = max(age) if child_under_17 == 1
+bys hhid: egen oldestchild_in_hh2 = max(oldestchild_in_hh)
+
+gen agebin = 1 if oldestchild_in_hh2 <= 1
+replace agebin = 2 if oldestchild_in_hh2 >= 2 & oldestchild_in_hh2 <= 6
+replace agebin = 3 if oldestchild_in_hh2 >= 7 & oldestchild_in_hh2 <= 12
+replace agebin = 4 if oldestchild_in_hh2 >= 13 & oldestchild_in_hh2 <= 17
+replace agebin = 0 if agebin == .
+
+* Subset to population between ages 18 and 55
+keep if age >= 18 & age <= 55
+
+* Identify employed, unemployed persons, and persons not in the labor force (NILF).
+* Employed persons includes individuals in the Armed Forces (empstat == 1).
+gen emp_persons = (empstat <= 12)
+gen unemp_persons = (empstat == 21 | empstat == 22)
+gen nilf_persons = (empstat >= 32)
+
+tempfile tempdata
+save `tempdata'
+
+
+* Aggregate to month-gender level (use person-level weight since we are interested
+* in the number of persons, not the number of households)
+
+* By number of chilldren in household
+collapse (rawsum) emp_persons_uw=emp_persons unemp_persons_uw=unemp_persons nilf_persons_uw=nilf_persons (sum) emp_persons unemp_persons nilf_persons [pweight=wtfinl], by(nchild_in_hh sex year month)
+
+* Reshape to wide
+quietly reshape wide emp_persons* unemp_persons* nilf_persons*, i(year month sex) j(nchild_in_hh)
+
+foreach var in emp_persons unemp_persons nilf_persons {
+	gen `var'_atleast1 = `var'1 + `var'2 + `var'3
+}
+
+format *persons* %15.0f
+
+* Store unweighted sample sizes
+preserve
+	
+	keep year month sex *_uw*
+
+	* Persons with at least 1 child in the household
+	foreach var in emp_persons unemp_persons nilf_persons {
+		gen `var'_uw_atleast1 = `var'_uw1 + `var'_uw2 + `var'_uw3
+	}
+	
+	* Calculate total persons
+	foreach n in "0" "1" "2" "3" "_atleast1" {
+		gen total_persons_uw`n' = emp_persons_uw`n' + unemp_persons_uw`n' + nilf_persons_uw`n'
+	}
+
+	* Order and label variables
+	order year month sex emp_persons* unemp_persons* nilf_persons*
+	label var emp_persons_uw0 "Employed persons: no child in household"
+	label var emp_persons_uw1 "Employed persons: 1 child in household"
+	label var emp_persons_uw2 "Employed persons: 2 children in household"
+	label var emp_persons_uw3 "Employed persons: 3+ children in household"
+	label var emp_persons_uw_atleast1 "Employed persons: at least 1 child in household"
+	label var unemp_persons_uw0 "Unemployed persons: no child in household"
+	label var unemp_persons_uw1 "Unemployed persons: 1 child in household"
+	label var unemp_persons_uw2 "Unemployed persons: 2 children in household"
+	label var unemp_persons_uw3 "Unemployed persons: 3+ children in household"
+	label var unemp_persons_uw_atleast1 "Unemployed persons: at least 1 child in household"
+	label var nilf_persons_uw0 "NILF persons: no child in household"
+	label var nilf_persons_uw1 "NILF persons: 1 child in household"
+	label var nilf_persons_uw2 "NILF persons: 2 children in household"
+	label var nilf_persons_uw3 "NILF persons: 3+ children in household"
+	label var nilf_persons_uw_atleast1 "NILF persons: at least 1 child in household"
+	label var total_persons_uw0 "Total persons: no child in household"
+	label var total_persons_uw1 "Total persons: 1 child in household"
+	label var total_persons_uw2 "Total persons: 2 children in household"
+	label var total_persons_uw3 "Total persons: 3+ children in household"
+	label var total_persons_uw_atleast1 "Total persons: at least 1 child in household"
+
+	sort sex year month
+
+	* Export to Excel
+	export excel "persons_with_child_in_household.xlsx", sheetreplace sheet("Emp_unweighted - nchild") firstrow(varlabels)
+	
+restore
+
+* Drop unweighted variables
+drop *_uw*
+
+* Calculate additional metrics
+foreach n in "0" "1" "2" "3" "_atleast1" {
+	* Calculate total persons
+	gen total_persons`n' = emp_persons`n' + unemp_persons`n' + nilf_persons`n'
+	
+	* Employment-to-population ratio (employed divided by total population)
+	gen epops`n' = emp_persons`n' / total_persons`n'
+	
+	* Labor force participation rate (employed + unemployment / total population)
+	gen lfpr`n' = (emp_persons`n' + unemp_persons`n') / total_persons`n'
+}
+
+* Order and label variables
+label var emp_persons0 "Employed persons: no child in household"
+label var emp_persons1 "Employed persons: 1 child in household"
+label var emp_persons2 "Employed persons: 2 children in household"
+label var emp_persons3 "Employed persons: 3+ children in household"
+label var emp_persons_atleast1 "Employed persons: at least 1 child in household"
+label var unemp_persons0 "Unemployed persons: no child in household"
+label var unemp_persons1 "Unemployed persons: 1 child in household"
+label var unemp_persons2 "Unemployed persons: 2 children in household"
+label var unemp_persons3 "Unemployed persons: 3+ children in household"
+label var unemp_persons_atleast1 "Unemployed persons: at least 1 child in household"
+label var nilf_persons0 "NILF persons: no child in household"
+label var nilf_persons1 "NILF persons: 1 child in household"
+label var nilf_persons2 "NILF persons: 2 children in household"
+label var nilf_persons3 "NILF persons: 3+ children in household"
+label var nilf_persons_atleast1 "NILF persons: at least 1 child in household"
+label var total_persons0 "Total persons: no child in household"
+label var total_persons1 "Total persons: 1 child in household"
+label var total_persons2 "Total persons: 2 children in household"
+label var total_persons3 "Total persons: 3+ children in household"
+label var total_persons_atleast1 "Total persons: at least 1 child in household"
+label var epops0 "Emp-to-Pop Ratio: no child in household"
+label var epops1 "Emp-to-Pop Ratio: 1 child in household"
+label var epops2 "Emp-to-Pop Ratio: 2 children in household"
+label var epops3 "Emp-to-Pop Ratio: 3+ children in household"
+label var epops_atleast1 "Emp-to-Pop Ratio: at least 1 child in household"
+label var lfpr0 "Labor Force Participation Rate: no child in household"
+label var lfpr1 "Labor Force Participation Rate: 1 child in household"
+label var lfpr2 "Labor Force Participation Rate: 2 children in household"
+label var lfpr3 "Labor Force Participation Rate: 3+ children in household"
+label var lfpr_atleast1 "Labor Force Participation Rate: at least 1 child in household"
+order year month sex emp_persons* unemp_persons* nilf_persons* total_persons* epops* lfpr*
+
+sort sex year month
+
+* Export to Excel
+export excel "persons_with_child_in_household.xlsx", sheetreplace sheet("Employment - nchild") firstrow(varlabels)
+
+* Figure 2. Labor Force Participation Rate of Men and Women 18-55 Who Have Children
+* in the Household, January - September 2020
+preserve
+	* Keep relevant variables
+	keep sex year month lfpr_atleast1
+
+	* Reshape to wide and rename variables
+	quietly reshape wide lfpr_atleast1, i(year month) j(sex)
+	ren (lfpr_atleast11 lfpr_atleast12) (male female)
+
+	* Export figure data to Excel
+	export excel "persons_with_child_in_household.xlsx", sheetreplace sheet("Figure 2 LFPR for Parents") firstrow(variables)
+
+	* Format date variable
+	gen date = ym(year, month)
+	format date %tm
+
+	* Rescale
+	replace male = male * 100
+	replace female = female * 100
+
+	* Plot and save
+	twoway (line male date, yax(2) lcolor(navy) lpattern(solid)) (line female date, yax(1) lcolor(maroon) lpattern(dash)), graphregion(color(white)) legend(order(1 "Male" 2 "Female")) ytitle("Male Labor Force Participation (%)", ax(2)) ytitle("Female Labor Force Participation (%)", ax(1)) ylabel(80(2)90, ax(2)) ylabel(65(2)75, axis(1)) yline(80 90, lcolor(gs13) axis(2)) xtitle("Year-Month")
+	graph export "figure2_lfpr_for_parents.pdf", replace
+restore
+
+* Figure 3. Change in Labor Force Participation Rate of Men and Women 18-55 Who 
+* Have Children in the Household, January - September 2020, by Number of Children
+
+* Keep relevant variables
+keep sex year month lfpr1 lfpr2 lfpr3
+
+* Subset to January and August of 2020
+keep if month == 1 | month == 9
+
+* Reshape to wide and rename variables
+quietly reshape wide lfpr1 lfpr2 lfpr3, i(year sex) j(month)
+ren (lfpr11 lfpr21 lfpr31 lfpr19 lfpr29 lfpr39) (lfpr1_jan lfpr2_jan lfpr3_jan lfpr1_sep lfpr2_sep lfpr3_sep)
+
+* Calculate percent change from January to August of 2020
+forval n = 1/3 {
+	gen lfpr`n'_pctchg = (lfpr`n'_sep - lfpr`n'_jan) * 100
+}
+
+* Keep figure variables
+keep sex *_pctchg
+
+* Export figure data to Excel
+export excel "persons_with_child_in_household.xlsx", sheetreplace sheet("Figure 3 LFPR Change nchild") firstrow(variables)
+
+* Transpose data for graphing purposes
+xpose, clear varname
+ren (v1 v2) (male female)
+drop if _varname == "sex"
+replace _varname = "1 child" if _varname == "lfpr1_pctchg"
+replace _varname = "2 children" if _varname == "lfpr2_pctchg"
+replace _varname = "3+ children" if _varname == "lfpr3_pctchg"
+
+* Plot and save
+graph bar male female, over(_varname) graphregion(color(white)) legend(order(1 "Men" 2 "Women")) blabel(total, format("%12.2f"))
+graph export "figure3_lfpr_change_nchild.pdf", replace
+
+* Re-load data
+use `tempdata', clear
+
+* By age of oldlest chid in household
+collapse (rawsum) emp_persons_uw=emp_persons unemp_persons_uw=unemp_persons nilf_persons_uw=nilf_persons (sum) emp_persons unemp_persons nilf_persons [pweight=wtfinl], by(agebin sex year month)
+
+* Reshape to wide
+quietly reshape wide emp_persons* unemp_persons* nilf_persons*, i(year month sex) j(agebin)
+
+format *persons* %15.0f
+
+* Store unweighted sample sizes
+preserve
+	
+	keep year month sex *_uw*
+	
+	* Calculate total persons
+	forval n = 0/4 {
+		gen total_persons_uw`n' = emp_persons_uw`n' + unemp_persons_uw`n' + nilf_persons_uw`n'
+	}
+
+	* Order and label variables
+	order year month sex emp_persons* unemp_persons* nilf_persons*
+	label var emp_persons_uw0 "Employed persons: no child in household"
+	label var emp_persons_uw1 "Employed persons: Oldest child age 0-1"
+	label var emp_persons_uw2 "Employed persons: Oldest child age 2-6"
+	label var emp_persons_uw3 "Employed persons: Oldest child age 7-12"
+	label var emp_persons_uw4 "Employed persons: Oldest child age 13-17"
+	label var unemp_persons_uw0 "Unemployed persons: no child in household"
+	label var unemp_persons_uw1 "Unemployed persons: Oldest child age 0-1"
+	label var unemp_persons_uw2 "Unemployed persons: Oldest child age 2-6"
+	label var unemp_persons_uw3 "Unemployed persons: Oldest child age 7-12"
+	label var unemp_persons_uw4 "Unemployed persons: Oldest child age 13-17"
+	label var nilf_persons_uw0 "NILF persons: no child in household"
+	label var nilf_persons_uw1 "NILF persons: Oldest child age 0-1"
+	label var nilf_persons_uw2 "NILF persons: Oldest child age 2-6"
+	label var nilf_persons_uw3 "NILF persons: Oldest child age 7-12"
+	label var nilf_persons_uw4 "NILF persons: Oldest child age 13-17"
+	label var total_persons_uw0 "Total persons: no child in household"
+	label var total_persons_uw1 "Total persons: Oldest child age 0-1"
+	label var total_persons_uw2 "Total persons: Oldest child age 2-6"
+	label var total_persons_uw3 "Total persons: Oldest child age 7-12"
+	label var total_persons_uw4"Total persons: Oldest child age 13-17"
+	
+	sort sex year month
+
+	* Export to Excel
+	export excel "persons_with_child_in_household.xlsx", sheetreplace sheet("Emp_unweighted - oldest") firstrow(varlabels)
+	
+restore
+
+* Drop unweighted variables
+drop *_uw*
+
+* Calculate additional metrics
+forval n = 0/4 {
+	* Calculate total persons
+	gen total_persons`n' = emp_persons`n' + unemp_persons`n' + nilf_persons`n'
+	
+	* Employment-to-population ratio (employed divided by total population)
+	gen epops`n' = emp_persons`n' / total_persons`n'
+	
+	* Labor force participation rate (employed + unemployment / total population)
+	gen lfpr`n' = (emp_persons`n' + unemp_persons`n') / total_persons`n'
+}
+
+* Order and label variables
+label var emp_persons0 "Employed persons: no child in household"
+label var emp_persons1 "Employed persons: Oldest child age 0-1"
+label var emp_persons2 "Employed persons: Oldest child age 2-6"
+label var emp_persons3 "Employed persons: Oldest child age 7-12"
+label var emp_persons4 "Employed persons: Oldest child age 13-17"
+label var unemp_persons0 "Unemployed persons: no child in household"
+label var unemp_persons1 "Unemployed persons: Oldest child age 0-1"
+label var unemp_persons2 "Unemployed persons: Oldest child age 2-6"
+label var unemp_persons3 "Unemployed persons: Oldest child age 7-12"
+label var unemp_persons4 "Unemployed persons: Oldest child age 13-17"
+label var nilf_persons0 "NILF persons: no child in household"
+label var nilf_persons1 "NILF persons: Oldest child age 0-1"
+label var nilf_persons2 "NILF persons: Oldest child age 2-6"
+label var nilf_persons3 "NILF persons: Oldest child age 7-12"
+label var nilf_persons4 "NILF persons: Oldest child age 13-17"
+label var total_persons0 "Total persons: no child in household"
+label var total_persons1 "Total persons: Oldest child age 0-1"
+label var total_persons2 "Total persons: Oldest child age 2-6"
+label var total_persons3 "Total persons: Oldest child age 7-12"
+label var total_persons4 "Total persons: Oldest child age 13-17"
+label var epops0 "Emp-to-Pop Ratio: no child in household"
+label var epops1 "Emp-to-Pop Ratio: Oldest child age 0-1"
+label var epops2 "Emp-to-Pop Ratio: Oldest child age 2-6"
+label var epops3 "Emp-to-Pop Ratio: Oldest child age 7-12"
+label var epops4 "Emp-to-Pop Ratio: Oldest child age 13-17"
+label var lfpr0 "Labor Force Participation Rate: no child in household"
+label var lfpr1 "Labor Force Participation Rate: Oldest child age 0-1"
+label var lfpr2 "Labor Force Participation Rate: Oldest child age 2-6"
+label var lfpr3 "Labor Force Participation Rate: Oldest child age 7-12"
+label var lfpr4 "Labor Force Participation Rate: Oldest child age 13-17"
+order year month sex emp_persons* unemp_persons* nilf_persons* total_persons* epops* lfpr*
+
+sort sex year month
+
+* Export to Excel
+export excel "persons_with_child_in_household.xlsx", sheetreplace sheet("Employment - oldest") firstrow(varlabels)
+
+* Figure 4. Change in Labor Force Participation Rate of Men and Women 18-55 Who 
+* Have Children in the Household, January – August 2020, by Age of Oldest Child
+
+* Keep relevant variables
+keep sex year month lfpr1 lfpr2 lfpr3 lfpr4
+
+* Subset to January and September of 2020
+keep if month == 1 | month == 9
+
+* Reshape to wide and rename variables
+quietly reshape wide lfpr1 lfpr2 lfpr3 lfpr4, i(year sex) j(month)
+ren (lfpr11 lfpr21 lfpr31 lfpr41 lfpr19 lfpr29 lfpr39 lfpr49) (lfpr1_jan lfpr2_jan lfpr3_jan lfpr4_jan lfpr1_sep lfpr2_sep lfpr3_sep lfpr4_sep)
+
+* Calculate percent change from January to August of 2020
+forval n = 1/4 {
+	gen lfpr`n'_pctchg = (lfpr`n'_sep - lfpr`n'_jan) * 100
+}
+
+* Keep figure variables
+keep sex *_pctchg
+
+* Export figure data to Excel
+export excel "persons_with_child_in_household.xlsx", sheetreplace sheet("Figure 4 LFPR Change oldest") firstrow(variables)
+
+* Transpose data for graphing purposes
+xpose, clear varname
+ren (v1 v2) (male female)
+drop if _varname == "sex"
+replace _varname = "0-1 years old" if _varname == "lfpr1_pctchg"
+replace _varname = "2-6 years old" if _varname == "lfpr2_pctchg"
+replace _varname = "7-12 years old" if _varname == "lfpr3_pctchg"
+replace _varname = "13-17 years old" if _varname == "lfpr4_pctchg"
+
+* Create sort order for figure
+gen sortorder = 1 if _varname == "0-1 years old"
+replace sortorder = 2 if _varname == "2-6 years old" 
+replace sortorder = 3 if _varname == "7-12 years old"
+replace sortorder = 4 if _varname == "13-17 years old"
+sort sortorder
+
+* Plot and save
+graph bar male female, over(_varname, sort(sortorder)) graphregion(color(white)) legend(order(1 "Men" 2 "Women")) blabel(total, format("%12.2f"))
+graph export "figure4_lfpr_change_oldest.pdf", replace
+
+/*
+* Variables in our extract
+
+Type	Variable	Label
+H	YEAR	Survey year
+H	SERIAL	Household serial number
+H	MONTH	Month
+H	HWTFINL	Household weight, Basic Monthly
+H	CPSID	CPSID, household record
+H	ASECFLAG	Flag for ASEC
+H	MISH	Month in sample, household level
+H	REGION	Region and division
+H	STATEFIP	State (FIPS code)
+H	METAREA	Metropolitan area
+H	COUNTY	FIPS county code
+H	FAMINC	Family income of householder
+H	HRHHID	Household ID, part 1
+H	HRHHID2	Household ID, part 2
+P	PERNUM	Person number in sample unit
+P	WTFINL	Final Basic Weight
+P	CPSIDP	CPSID, person record
+P	RELATE	Relationship to household head
+P	AGE	Age
+P	SEX	Sex
+P	RACE	Race
+P	POPSTAT	Adult civilian, armed forces, or child
+P	HISPAN	Hispanic origin
+P	EMPSTAT	Employment status
+P	LABFORCE	Labor force status
+P	OCC	Occupation
+P	IND	Industry
+P	CLASSWKR	Class of worker
+P	UHRSWORKT	Hours usually worked per week at all jobs
+P	UHRSWORK1	Hours usually worked per week at main job
+P	UHRSWORK2	Hours usually worked per week, other job(s)
+P	AHRSWORKT	Hours worked last week
+P	AHRSWORK1	Hours worked last week, main job
+P	AHRSWORK2	Hours worked last week, other job(s)
+P	ABSENT	Absent from work last week
+P	DURUNEM2	Continuous weeks unemployed, intervalled
+P	DURUNEMP	Continuous weeks unemployed
+P	WHYUNEMP	Reason for unemployment
+P	WHYABSNT	Reason for absence from work
+P	WHYPTLWK	Reason for working part time last week
+P	WKSTAT	Full or part time status
+P	EDUC	Educational attainment recode
+P	EDUC99	Educational attainment, 1990
+P	EDDIPGED	High school or GED
+P	SCHLCOLL	School or college attendance
+P	EARNWT	Earnings weight
+P	LNKFW1MWT	Longitudinal weight for two adjacent months (BMS only)
+P	PANLWT	Month-to-month panel weight
+P	HOURWAGE	Hourly wage
+P	PAIDHOUR	Paid by the hour
+P	UNION	Union membership
+P	EARNWEEK	Weekly earnings
+P	UHRSWORKORG	Usual hours worked per week, outgoing rotation groups
+P	WKSWORKORG	Weeks worked per year, outgoing rotation groups
+P	ELIGORG	(Earnings) eligibility flag
+P	OTPAY	Usually receive overtime, tips, or commissions
+P	UH_MLR_B3	Monthly labor force recode (formerly esr), 1994-2020_08
+P	UH_LAY6M_B1	Recall to work within 6 months, 1994-2020_08
+P	UH_LAYDT_B1	Return to work date, 1994-2020_08
+P	UH_LAYOFF_B1	On layoff last week, 1994-2020_08
+*/
